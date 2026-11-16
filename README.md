@@ -58,7 +58,8 @@ Excel template ──load──▶ workbook (.xlsx / .xls→.xlsx)
                      output/<new_month>.xlsx
 ```
 
-Concrete steps, matching `src` symbol names so edits are easy to trace:
+Concrete steps, matching the function names in `update_timesheet.py` so edits are
+easy to trace:
 
 1. **Load** — `load_workbook_any()`: `.xlsx` via `openpyxl`; `.xls` via `xlrd`, converting
    values + styles (font, borders, alignment, fill, number format, column widths,
