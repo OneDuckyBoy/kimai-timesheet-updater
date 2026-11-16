@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Run artifacts — never commit outcomes
+output/
+input/*.xlsx
+input/*.xls
+input/*.csv
+
+# PyInstaller build intermediates
+build/
+*.spec.manifest
+*.toc
+
+# OS junk
+.DS_Store
+Thumbs.db
