@@ -1,0 +1,11 @@
+# The image only needs the script + requirements; keep the build context tiny.
+.git
+.gitignore
+examples
+scripts
+input
+output
+dist
+build
+*.pyc
+__pycache__
