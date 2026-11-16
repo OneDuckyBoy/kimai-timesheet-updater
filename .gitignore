@@ -11,6 +11,12 @@ input/*.xlsx
 input/*.xls
 input/*.csv
 
+# Never commit real timesheet templates / exports (they start with the client
+# prefix "ORBIS" or a Cyrillic "ОRBIS" — contains real employee data)
+*RBIS*Timesheet*
+ORBIS*
+ОRBIS*
+
 # PyInstaller build intermediates
 build/
 *.spec.manifest

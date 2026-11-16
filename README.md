@@ -104,8 +104,8 @@ easy to trace:
 pip install -r requirements.txt
 
 python update_timesheet.py \
-  "examples/timesheets/ORBIS - Timesheet Report Enabl October 2026 (2).xlsx" \
-  examples/kimai_export.csv          # → output/ORBIS - Timesheet Report Enabl November 2026 (2).xlsx
+  "examples/timesheets/Acme - Timesheet Report October 2026.xlsx" \
+  examples/kimai_export.csv          # → output/Acme - Timesheet Report November 2026.xlsx
 ```
 
 ---
@@ -120,8 +120,10 @@ python update_timesheet.py \
 ├── requirements.txt       # openpyxl, xlrd
 ├── timesheet-updater.spec # PyInstaller spec
 ├── examples/              # sample templates + sample Kimai CSV (demo/validation inputs)
-│   ├── timesheets/        #   real OrbisDS October 2026 templates
-│   └── kimai_export.csv   #   demo export (people from the Enabl sheet)
+│   ├── timesheets/        #   anonymized fake-company template (Acme Studio)
+│   └── kimai_export.csv   #   demo export (people from the Acme template)
+├── scripts/               # maintenance tools
+│   └── build_fake_template.py  #  regenerate the anonymized example from a real template
 ├── input/                 # drop template + CSV here, then run run.bat
 ├── output/                # results
 └── dist/                  # built .exe (created by build_exe.bat)
@@ -147,7 +149,7 @@ Output naming: the template's filename with the old month/year replaced by the n
 
 | Column | Example | Notes |
 |--------|---------|-------|
-| `Name` | `Milen Todorov` | matched to the `Timesheet <Name>` sheet |
+| `Name` | `John A. Doe` | matched to the `Timesheet <Name>` sheet |
 | `Date` | `2026-11-02` | `%Y-%m-%d` |
 | `Duration` | `8:00` | `h:mm`; summed per day, rounded to 2 decimals |
 | `Description` | `Frontend work` | multiple entries per day joined with `; ` |
@@ -163,7 +165,7 @@ Output naming: the template's filename with the old month/year replaced by the n
 These are the assumptions the script relies on. **Changes to templates must respect
 them** (or the matching logic below must change with them):
 
-- **Person sheets** start their name with `Timesheet ` — e.g. `Timesheet Milen Todorov`.
+- **Person sheets** start their name with `Timesheet ` — e.g. `Timesheet John A. Doe`.
 - **Summary sheet** has `Budget` in its name, or contains an `Actual Hours` header.
 - **Month/year** appears in a title as `<Full Month> <year>` (e.g. `Timesheet Report June 2026`);
   `extract_month_year()` regex uses the `MONTHS` list in `update_timesheet.py`.
@@ -236,16 +238,13 @@ The repo ships ready-to-run fixtures under `examples/` so a change can be valida
 without touching real data:
 
 ```bash
-# 1. Source run against the demo (Enabl template + demo CSV)
+# 1. Source run against the demo (fake Acme template + demo CSV)
 python update_timesheet.py \
-  "examples/timesheets/ORBIS - Timesheet Report Enabl October 2026 (2).xlsx" \
+  "examples/timesheets/Acme - Timesheet Report October 2026.xlsx" \
   examples/kimai_export.csv --outdir /tmp/kts-out
 
-# 2. Repeat over every sample template to confirm nothing crashes on different layouts
-for f in examples/timesheets/*.xlsx; do
-  python update_timesheet.py "$f" examples/kimai_export.csv --outdir /tmp/kts-out \
-    >/dev/null 2>&1 && echo "OK  $f" || echo "FAIL $f"
-done
+# 2. Regenerate the anonymized example from a real template (kept offline, never committed)
+python scripts/build_fake_template.py "/path/to/a/real/timesheet.xlsx"
 ```
 
 Check: exit code `0`, output file exists with the new month in the name, a person sheet
@@ -263,6 +262,15 @@ than the template had (that exercises `_apply_template_style`/insert/delete path
       part of the platform's Timesheet module, replacing this standalone script
 - [ ] Push completed timesheets back to Kimai
 - [ ] Per-project / per-client reporting on top of the team budget summary
+
+---
+
+## Privacy / sample data
+
+`examples/timesheets/` contains **only an anonymized fake-company template**
+(`Acme Studio`, workers `John A. Doe` etc.). No real OrbisDS names, employees,
+clients or hours are committed. The real templates stay offline; regenerate the
+example from one with `scripts/build_fake_template.py <real.xlsx>`.
 
 ---
 
