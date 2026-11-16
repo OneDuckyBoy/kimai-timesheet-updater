@@ -28,13 +28,11 @@ import calendar
 import os
 import re
 import sys
-import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 
 import openpyxl
-from openpyxl.styles import numbers
 from openpyxl.utils import get_column_letter
 
 
@@ -454,116 +452,7 @@ def find_title_info(ws) -> Optional[dict]:
     return None
 
 
-# ── Person Name → Excel Sheet Mapping ────────────────────────────────────────
-
-def normalize_name(name: str) -> list[str]:
-    """
-    Generate alternative versions of a name for matching.
-    - Original: "MariyanDimitrov"
-    - Also tries: "Mariyan Dimitrov" (split CamelCase without spaces)
-    Returns list of lowercase variants to try.
-    """
-    variants = [name.strip().lower()]
-
-    # If no space but has uppercase letters in the middle, try splitting
-    if " " not in name:
-        # Find camelCase boundaries: lowercase followed by uppercase
-        parts = re.findall(r'[A-Z][a-z]+', name)
-        if len(parts) >= 2:
-            variants.append(" ".join(parts).lower())
-
-    return variants
-
-
-def match_csv_to_sheet(csv_name: str, excel_names: dict[str, str]) -> Optional[str]:
-    """
-    Try to match a CSV name to an Excel sheet name.
-    Returns sheet name if found, None otherwise.
-    """
-    variants = normalize_name(csv_name)
-    for variant in variants:
-        if variant in excel_names:
-            return excel_names[variant]
-    return None
-
-
-def build_name_to_sheet(wb) -> dict[str, str]:
-    """
-    Build mapping: lowercase person name → sheet name.
-    Uses the first data row to read the worker name.
-    """
-    mapping = {}
-    person_sheets = [s for s in wb.sheetnames if s.startswith("Timesheet")]
-
-    for sheet_name in person_sheets:
-        ws = wb[sheet_name]
-        fmt = detect_sheet_format(ws)
-        if not fmt:
-            continue
-
-        first_data_row = fmt["header_row"] + 1
-        name_cell = ws[f"{fmt['col_name']}{first_data_row}"]
-        if name_cell.value:
-            mapping[str(name_cell.value).strip().lower()] = sheet_name
-
-    return mapping
-
-
 # ── Updating a Person's Sheet ────────────────────────────────────────────────
-
-def update_person_sheet(ws, fmt: dict, entries_by_date: list[dict],
-                        new_month: str, new_year: int,
-                        old_month: str, old_year: int) -> None:
-    """
-    Update a single person's timesheet:
-    - Clear old data rows
-    - Insert new data from CSV (or leave empty)
-    - Update SUBTOTAL formula
-    - Update title month
-    """
-    header_row = fmt["header_row"]
-    first_data_row = header_row + 1
-    total_row = find_total_row(ws, fmt)
-    if not total_row:
-        print(f"  ⚠ Could not find 'Total hours' row, skipping")
-        return
-
-    # ── Update title ─────────────────────────────────────────────────────
-    title_info = find_title_info(ws)
-    if title_info:
-        new_title = replace_month_in_text(
-            title_info["text"], old_month, old_year, new_month, new_year
-        )
-        ws[title_info["cell"]] = new_title
-
-    # ── Clear old data rows ──────────────────────────────────────────────
-    old_last_data_row = total_row - 2  # skip blank row before total
-
-    for r in range(first_data_row, total_row):
-        for col in [fmt["col_date"], fmt["col_name"], fmt["col_activity"], fmt["col_hours"]]:
-            ws[f"{col}{r}"] = None
-
-    # ── Write new data ───────────────────────────────────────────────────
-    worker_name = None
-    # Try to get worker name from first existing data row or first CSV entry
-    if entries_by_date:
-        # We need the worker name — grab it from the old data before clearing, or from CSV
-        # Actually, we already cleared it. Let's check if there's still a name somewhere.
-        pass
-
-    # Actually, we need the name. Let's get it from the merged cell or from the old data
-    # before clearing. Let me restructure: get worker name BEFORE clearing.
-
-    # For now, get name from CSV or from any remaining cell
-    # Better approach: get it from the first entry
-    if entries_by_date:
-        # Worker name — we'll write it per row, but we need it.
-        # Get from a cell that might still have it (maybe the first data row's name column
-        # wasn't cleared because we don't know the name yet).
-        # Actually, let's extract the name from the sheet's title or a reference cell.
-        # Hmm, the simplest way is to pass the worker name as a parameter.
-        pass
-
 
 def update_person_sheet_v2(ws, fmt: dict, worker_name: str,
                            entries_by_date: list[dict],
@@ -688,19 +577,6 @@ def update_person_sheet_v2(ws, fmt: dict, worker_name: str,
 
 # ── Team Budget Report ───────────────────────────────────────────────────────
 
-def _sheet_from_cross_ref(value):
-    """
-    If `value` is a cross-sheet formula we wrote earlier, e.g.
-    ='Timesheet X'!C8, return the referenced sheet name; otherwise None.
-    Lets later runs (input = previous output) re-resolve each worker's
-    sheet even though the name cell is now a formula, not plain text.
-    """
-    if not isinstance(value, str) or not value.startswith("="):
-        return None
-    m = re.search(r"='([^']+)'!", value)
-    return m.group(1) if m else None
-
-
 def find_budget_sheet(wb) -> Optional[str]:
     """
     Find the budget/summary sheet. Looks for:
@@ -730,7 +606,11 @@ def update_budget_report(wb, kimai_data: dict[str, list[dict]],
                          new_month: str, new_year: int,
                          old_month: str, old_year: int) -> None:
     """
-    Update the Team Budget Report sheet.
+    Rebuild the Team Budget Report sheet's data rows from the CSV people:
+    one row per person with live INDEX/MATCH formulas into their sheet, a
+    dynamic SUBTOTAL and the new date range. The template's placeholder
+    person rows are replaced, never carried over — the summary lists exactly
+    who is in the CSV.
     """
     budget_name = find_budget_sheet(wb)
     if not budget_name:
@@ -739,115 +619,54 @@ def update_budget_report(wb, kimai_data: dict[str, list[dict]],
     ws = wb[budget_name]
 
     # ── Update title ─────────────────────────────────────────────────────
-    for row in range(1, 5):
+    for row in range(1, 6):
         for col in ["A", "B"]:
             cell = ws[f"{col}{row}"]
             if cell.value:
                 month_info = extract_month_year(str(cell.value))
                 if month_info:
-                    new_title = replace_month_in_text(
+                    cell.value = replace_month_in_text(
                         str(cell.value), old_month, old_year, new_month, new_year
                     )
-                    ws[f"{col}{row}"] = new_title
                     break
 
-    # ── Update date range ────────────────────────────────────────────────
     _, _, date_display = month_date_range(new_month, new_year)
 
-    # Find data rows (where worker names are in column B)
+    # ── Locate the header, the data area and the total row ───────────────
     first_data_row = None
-    last_data_row = None
-
-    for row in range(1, 50):
+    for row in range(1, 30):
         b_val = ws[f"B{row}"].value
-        d_val = ws[f"D{row}"].value
         if b_val and str(b_val).strip() == "Worker name":
             first_data_row = row + 1
-        if d_val and "SUBTOTAL" in str(d_val):
             break
-        if b_val and first_data_row and row >= first_data_row:
-            last_data_row = row
-
     if not first_data_row:
         print("  ⚠ Could not find data in Team Budget Report")
         return
 
-    # ── Update each person's hours ───────────────────────────────────────
-    # The hours now come LIVE from the person's own sheet via an
-    # INDEX/MATCH formula on the "Total hours" label. This is robust to
-    # rows being inserted/deleted (the formula finds the total wherever it
-    # moves), and it always reflects what is really in the person's sheet —
-    # even if someone edited it by hand.
-    for row in range(first_data_row, 40):
-        name_cell = ws[f"B{row}"]
-        cur_b = name_cell.value
-        if not cur_b:
-            break
-
-        # Also update date range
-        ws[f"A{row}"] = date_display
-
-        # Resolve the person's sheet. On a fresh template B holds a plain
-        # name; on a later run (input = previous output) B holds a
-        # cross-sheet formula we wrote, e.g. ='Timesheet X'!C8, so parse
-        # the sheet name out of it.
-        sheet_name = _sheet_from_cross_ref(cur_b)
-        if sheet_name is None:
-            person_name = str(cur_b).strip()
-            candidate = f"Timesheet {person_name}"
-            if candidate in wb.sheetnames:
-                sheet_name = candidate
-            else:
-                # Tolerate suffix/tab variants: "Timesheet X - Tab..."
-                for sn in wb.sheetnames:
-                    if sn.startswith("Timesheet") and person_name.lower() in sn.lower():
-                        sheet_name = sn
-                        break
-
-        person_sheet = wb[sheet_name] if (sheet_name and sheet_name in wb.sheetnames) else None
-        if person_sheet is not None:
-            pfmt = detect_sheet_format(person_sheet)
-            if pfmt and find_total_row(person_sheet, pfmt):
-                quoted = f"'{sheet_name}'"
-
-                # Name comes live from the person's own sheet.
-                pname_cell = f"{pfmt['col_name']}{pfmt['header_row'] + 1}"
-                name_cell.value = f"={quoted}!{pname_cell}"
-
-                # Hours come live from the person's "Total hours" row.
-                act_col = pfmt["col_activity"]
-                hrs_col = pfmt["col_hours"]
-                d_cell = ws[f"D{row}"]
-                d_cell.value = (
-                    f"=INDEX({quoted}!{hrs_col}:{hrs_col}, "
-                    f"MATCH(\"Total hours\", {quoted}!{act_col}:{act_col}, 0))"
-                )
-                if not d_cell.number_format or d_cell.number_format == "General":
-                    d_cell.number_format = "0.00"
-                continue
-
-        # No matching sheet / no "Total hours" row → keep a plain zero.
-        format_hours_cell(ws[f"D{row}"], 0)
-
-    # ── Update SUBTOTAL formula ──────────────────────────────────────────
-    # Dynamic range: from the first data row down to the row just above the
-    # total (ROW()-1), so manually-added budget rows are included. SUBTOTAL(9)
-    # sums only numeric cells (ignores text).
-    last_data_row = row - 1
-    # Find the total row
-    for total_row in range(last_data_row + 1, last_data_row + 5):
-        c_val = ws[f"C{total_row}"].value
+    total_row = None
+    for row in range(first_data_row + 1, 60):
+        c_val = ws[f"C{row}"].value
         if c_val and "Total" in str(c_val):
-            formula = f"=SUBTOTAL(9,D{first_data_row}:INDEX(D:D,ROW()-1))"
-            total_cell = ws[f"D{total_row}"]
-            total_orig_nf = total_cell.number_format
-            total_cell.value = formula
-            # keep the template's own number format (decimal hours), not '[h]:mm'
-            if not total_orig_nf or total_orig_nf == "General":
-                total_cell.number_format = "0.00"
+            total_row = row
             break
+    if not total_row:
+        print("  ⚠ Could not find 'Total hours' row in Team Budget Report")
+        return
 
-    # ── Apply borders ──────────────────────────────────────────────────
+    # ── Drop the template's placeholder people rows ──────────────────────
+    if total_row - 1 > first_data_row:
+        ws.delete_rows(first_data_row, total_row - 1 - first_data_row)
+    # Re-locate the total row after the delete (it slid up by the deleted count).
+    total_row = None
+    for row in range(first_data_row, 60):
+        c_val = ws[f"C{row}"].value
+        if c_val and "Total" in str(c_val):
+            total_row = row
+            break
+    if not total_row:
+        print("  ⚠ Could not find 'Total hours' row in Team Budget Report (after delete)")
+        return
+
     from openpyxl.styles import Border, Side, Font
     thin = Border(
         left=Side(style='thin'), right=Side(style='thin'),
@@ -855,22 +674,88 @@ def update_budget_report(wb, kimai_data: dict[str, list[dict]],
     )
     bold = Font(bold=True)
 
-    # Header
-    for col in ['A', 'B', 'C', 'D']:
-        c = ws[f"{col}{first_data_row - 1}"]
-        c.border = thin
-        c.font = bold
+    people = [n for n in kimai_data if name_to_sheet.get(n) in wb.sheetnames]
+    if people:
+        ws.insert_rows(total_row, len(people))
+        total_row += len(people)
 
-    # Data rows
+    # ── One row per CSV person; hours read live from their own sheet ─────
+    for i, csv_name in enumerate(people):
+        row = first_data_row + i
+        sheet_title = name_to_sheet[csv_name]
+        # Role is left blank — the PM fills it in when checking.
+        ws[f"A{row}"] = date_display
+
+        person_sheet = wb[sheet_title]
+        pfmt = detect_sheet_format(person_sheet)
+        if pfmt and find_total_row(person_sheet, pfmt):
+            quoted = f"'{sheet_title}'"
+            # Name comes live from the person's sheet.
+            pname_cell = f"{pfmt['col_name']}{pfmt['header_row'] + 1}"
+            ws[f"B{row}"] = f"={quoted}!{pname_cell}"
+            # Hours come live from the person's "Total hours" row.
+            act_col = pfmt["col_activity"]
+            hrs_col = pfmt["col_hours"]
+            d_cell = ws[f"D{row}"]
+            d_cell.value = (
+                f"=INDEX({quoted}!{hrs_col}:{hrs_col}, "
+                f"MATCH(\"Total hours\", {quoted}!{act_col}:{act_col}, 0))"
+            )
+            if not d_cell.number_format or d_cell.number_format == "General":
+                d_cell.number_format = "0.00"
+        else:
+            # No computable total — keep the person visible as a plain zero
+            # so a PM spots and fixes the sheet when checking.
+            ws[f"B{row}"] = csv_name
+            format_hours_cell(ws[f"D{row}"], 0)
+
+        for col in ["A", "B", "C", "D"]:
+            ws[f"{col}{row}"].border = thin
+
+    last_data_row = first_data_row + len(people) - 1 if people else first_data_row
+
+    # ── SUBTOTAL formula (dynamic, sums the rows above it) ───────────────
+    total_cell = ws[f"D{total_row}"]
+    total_orig_nf = total_cell.number_format
+    total_cell.value = f"=SUBTOTAL(9,D{first_data_row}:INDEX(D:D,ROW()-1))"
+    if not total_orig_nf or total_orig_nf == "General":
+        total_cell.number_format = "0.00"
+
+    # ── Borders: header, data, total ─────────────────────────────────────
+    for col in ["A", "B", "C", "D"]:
+        hdr = ws[f"{col}{first_data_row - 1}"]
+        hdr.border = thin
+        hdr.font = bold
     for r in range(first_data_row, last_data_row + 1):
-        for col in ['A', 'B', 'C', 'D']:
+        for col in ["A", "B", "C", "D"]:
             ws[f"{col}{r}"].border = thin
-
-    # Total row
     ws[f"C{total_row}"].border = thin
     ws[f"C{total_row}"].font = bold
     ws[f"D{total_row}"].border = thin
     ws[f"D{total_row}"].font = bold
+
+
+# ── Person-sheet naming (CSV drives the people) ─────────────────────────────
+
+def _person_sheet_title(name: str) -> str:
+    """A safe Excel sheet title for one person: 'Timesheet <name>', <=31 chars."""
+    title = f"Timesheet {name}"
+    for ch in "[]:*?/\\":
+        title = title.replace(ch, " ")
+    title = re.sub(r"\s+", " ", title).strip()
+    return title[:31]
+
+
+def _unique_sheet_title(wb, name: str) -> str:
+    """A person sheet title that no sheet in `wb` already has."""
+    base = _person_sheet_title(name)
+    title = base
+    n = 2
+    while title in wb.sheetnames:
+        suffix = f"-{n}"
+        title = f"{base[:31 - len(suffix)]}{suffix}"
+        n += 1
+    return title
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -958,80 +843,51 @@ def main():
     print(f"\n📅 Current month (template): {old_month} {old_year}")
     print(f"📅 Target month (from CSV): {new_month} {new_year}")
 
-    # ── Map person names to sheets ───────────────────────────────────────
-    name_to_sheet = build_name_to_sheet(wb)
-    print(f"\n👥 People in Excel: {len(name_to_sheet)}")
-    matched_csv = set()
-    for name, sheet in sorted(name_to_sheet.items()):
-        matched = False
-        for csv_name in kimai_data:
-            if match_csv_to_sheet(csv_name, {name: sheet}):
-                matched = True
-                matched_csv.add(csv_name)
-                break
-        in_csv = "✓" if matched else "✗"
-        print(f"   {in_csv} {name} → {sheet}")
-
-    # ── Show unmatched CSV names ──────────────────────────────────────
-    unmatched = [n for n in kimai_data if n not in matched_csv]
-    if unmatched:
-        print(f"\n⚠ Unmatched in CSV (not in Excel):")
-        for n in unmatched:
-            print(f"   ? {n}")
-
-    # ── Process each person's sheet ──────────────────────────────────────
-    print(f"\n🔄 Processing sheets...")
-
-    for sheet_name in wb.sheetnames:
-        if not sheet_name.startswith("Timesheet"):
-            continue
-
-        ws = wb[sheet_name]
-        fmt = detect_sheet_format(ws)
-        if not fmt:
-            print(f"   ⚠ {sheet_name}: not a person sheet, skipping")
-            continue
-
-        # Get worker name from the sheet (first data row before clearing)
-        first_data_row = fmt["header_row"] + 1
-        worker_name = str(ws[f"{fmt['col_name']}{first_data_row}"].value or "").strip()
-
-        if not worker_name:
-            # Fall back to the sheet name ("Timesheet X" → "X") so that even
-            # people with no entries this month still get a name written in
-            # their sheet, which the summary later pulls live.
-            worker_name = sheet_name.replace("Timesheet ", "", 1).strip()
-
-        if not worker_name:
-            print(f"   ⚠ {sheet_name}: could not determine worker name, skipping")
-            continue
-
-        # Find matching CSV data using name normalization
-        matched_sheet = match_csv_to_sheet(worker_name, {worker_name.lower(): sheet_name})
-        csv_entries = None
-        if matched_sheet:
-            for csv_name, entries in kimai_data.items():
-                sheet_match = match_csv_to_sheet(csv_name, {worker_name.lower(): sheet_name})
-                if sheet_match:
-                    csv_entries = entries
-                    break
-
-        grouped = group_by_date(csv_entries) if csv_entries else []
-        has_data = "✓" if grouped else "✗ (no CSV data)"
-
-        # Update the sheet
-        last_data_row = update_person_sheet_v2(
-            ws, fmt, worker_name, grouped,
-            new_month, new_year, old_month, old_year
+    # ── The CSV is the only source of people ─────────────────────────────
+    # The template is minimal: one summary sheet + one placeholder person
+    # sheet. Every person in the CSV gets a clone of that placeholder sheet,
+    # filled from their own entries; the placeholder itself is removed from
+    # the result so only real people remain.
+    placeholder = next(
+        (sn for sn in wb.sheetnames if sn.lower().startswith("placeholder")),
+        None,
+    )
+    if placeholder is None:
+        print(
+            "ERROR: template has no 'placeholder timesheet' sheet. Expected a "
+            "minimal template (summary + one empty placeholder person sheet)."
         )
+        sys.exit(1)
+    ph_ws = wb[placeholder]
+    ph_fmt = detect_sheet_format(ph_ws)
+    if not ph_fmt:
+        print(f"ERROR: placeholder sheet '{placeholder}' does not look like a person sheet")
+        sys.exit(1)
 
+    print(f"\n👥 CSV people → cloned person sheets:")
+    created = {}
+    for csv_name, entries in kimai_data.items():
+        sheet_title = _unique_sheet_title(wb, csv_name)
+        new_ws = wb.copy_worksheet(ph_ws)
+        new_ws.title = sheet_title
+        grouped = group_by_date(entries)
+        update_person_sheet_v2(
+            new_ws, ph_fmt, csv_name, grouped,
+            new_month, new_year, old_month, old_year,
+        )
         total = sum(e["hours"] for e in grouped)
-        print(f"   {has_data} {worker_name}: {len(grouped)} days, {total:.1f}h")
+        has = "✓" if grouped else "✗ (0 hours)"
+        print(f"   {has} {csv_name}: {len(grouped)} days, {total:.1f}h → {sheet_title}")
+        created[csv_name] = sheet_title
 
-    # ── Update Team Budget Report ────────────────────────────────────────
+    # The placeholder is scaffolding only — it never belongs in the result.
+    wb.remove(wb[placeholder])
+    print(f"   Removed placeholder sheet: {placeholder}")
+
+    # ── Update Team Budget Report for the CSV people ─────────────────────
     print(f"\n📊 Updating Team Budget Report...")
     update_budget_report(
-        wb, kimai_data, name_to_sheet, {},
+        wb, kimai_data, created, {},
         new_month, new_year, old_month, old_year
     )
     print(f"   Done")

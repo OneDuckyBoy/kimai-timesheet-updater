@@ -31,7 +31,10 @@ platform (Kimai ↔ Timesheets); see [Roadmap](#roadmap).
 Every month someone manually copies Kimai hours into styled Excel timesheets. This
 script removes the manual work and produces a file that matches the template exactly:
 
+- **the CSV is the only source of people** — exactly the people in the CSV export get
+  a sheet in the result (nothing stale from the template carries over),
 - fills each person's sheet with the month's days (`dd.mm.yyyy`, activity, decimal hours),
+  cloning the template's one placeholder person sheet per person,
 - keeps the template's borders, colours, column widths, fonts and number formats,
 - updates every `SUBTOTAL` formula (dynamic, so it still works if rows are added by hand),
 - updates the **Team Budget Report** with **live `INDEX/MATCH` formulas** into each
@@ -48,11 +51,13 @@ It reads **`.xlsx`** and legacy **`.xls`** templates (`.xls` is converted in-mem
 Kimai CSV ──parse──▶ { name → [ {date, hours, description}, … ] }
                             │
 Excel template ──load──▶ workbook (.xlsx / .xls→.xlsx)
+   summary sheet + one "placeholder timesheet" sheet
                             │
     1. Detect months (template month → target month)
-    2. Build name→sheet map
-    3. Per person sheet: clear → write → formula → style
-    4. Update Team Budget Report (live formulas)
+    2. Find the placeholder person sheet
+    3. Per CSV person: clone the placeholder → "Timesheet <Name>", fill it
+    4. Remove the placeholder sheet
+    5. Rebuild Team Budget Report rows from the CSV people (live formulas)
                             │
                             ▼
                      output/<new_month>.xlsx
@@ -70,18 +75,20 @@ easy to trace:
    `extract_month_year` regex, or the budget sheet's title). The **target month** is the
    month with the most CSV entries (`csv_target_month`), falling back to the month
    *after* the template (`next_month`).
-4. **Map people** — `build_name_to_sheet()` looks up the worker name in each
-   `Timesheet …` sheet; `match_csv_to_sheet()` tolerates CamelCase-without-spaces
-   (`MariyanDimitrov` ↔ `Mariyan Dimitrov`).
-5. **Fill each person's sheet** — `update_person_sheet_v2()`: clear old rows, always
-   write the worker's name in the first data row, insert/delete rows as needed,
-   write values only (openpyxl keeps the template's existing style on `.value` set),
-   set the `SUBTOTAL(9, …:INDEX(…,ROW()-1))` formula, then stamp template styles onto
-   every data row (`_apply_template_style`).
-6. **Team Budget Report** — `update_budget_report()`: finds the budget sheet, refreshes
-   the month title and date range, writes per-person live `=INDEX('Timesheet X'!D:D,
-   MATCH("Total hours", …))` and name references, plus a team `SUBTOTAL`.
-7. **Save** — a new file named like the template but with the new month, into `output/`
+4. **The CSV is the only source of people** — the template holds one empty placeholder
+   person sheet (its name starts with `placeholder`). For every person in the CSV the
+   script `copy_worksheet`s that placeholder into `Timesheet <Name>` (`_unique_sheet_title`
+   keeps titles unique/pre-31 chars) and fills it.
+5. **Fill each person's sheet** — `update_person_sheet_v2()`: write the worker's name in
+   the first data row, insert/delete rows as needed, write values only, set the
+   `SUBTOTAL(9, …:INDEX(…,ROW()-1))` formula, then stamp template styles onto every data
+   row (`_apply_template_style`).
+6. **Remove the placeholder** — the scaffolding never belongs in the result.
+7. **Team Budget Report** — `update_budget_report()`: drops the template's placeholder
+   people rows, then writes one row **per CSV person** with live `=INDEX('Timesheet X'!D:D,
+   MATCH("Total hours", …))` and name references, plus a team `SUBTOTAL`. The Role column
+   is left blank for the PM to fill in.
+8. **Save** — a new file named like the template but with the new month, into `output/`
    (or `--output` / `--outdir`).
 
 ---
@@ -149,33 +156,44 @@ Output naming: the template's filename with the old month/year replaced by the n
 
 | Column | Example | Notes |
 |--------|---------|-------|
-| `Name` | `John A. Doe` | matched to the `Timesheet <Name>` sheet |
+| `Name` | `John A. Doe` | names the person's sheet (the CSV drives the people) |
 | `Date` | `2026-11-02` | `%Y-%m-%d` |
 | `Duration` | `8:00` | `h:mm`; summed per day, rounded to 2 decimals |
 | `Description` | `Frontend work` | multiple entries per day joined with `; ` |
 
-- Header row **required**.
-- People in the CSV with no matching sheet → listed as warnings.
-- People in the template with no CSV data → empty (but still formatted) sheet.
+- **Header row required**; columns are read **by name** (`csv.DictReader`), so the order
+  and any extra columns (the full Kimai export has ~27) do not matter — `Name`, `Date`,
+  `Duration`, `Description` are picked out regardless of position. Other columns
+  (`Project`, `Activity`, `Customer`, …) are currently not used.
+- **Only the people in the CSV get a sheet** — the result contains nothing stale from the
+  template. A person with no entries or 0 hours still appears (cloned + listed) so the PM
+  can spot and fix it.
 
 ---
 
 ## Template "contracts"
 
 These are the assumptions the script relies on. **Changes to templates must respect
-them** (or the matching logic below must change with them):
+them** (or the logic below must change with them):
 
-- **Person sheets** start their name with `Timesheet ` — e.g. `Timesheet John A. Doe`.
+- **The template is minimal and per project**: one **summary sheet** (`Budget` in the name,
+  or an `Actual Hours` header) plus **one empty placeholder person sheet** whose name
+  starts with `placeholder` (e.g. `placeholder timesheet 01`) — the formatting source.
+- **The placeholder is scaffolding only.** The script `copy_worksheet`s it into a
+  `Timesheet <Name>` per CSV person and **removes it** from the result — it is what makes
+  every generated person sheet match the template exactly.
 - **Summary sheet** has `Budget` in its name, or contains an `Actual Hours` header.
 - **Month/year** appears in a title as `<Full Month> <year>` (e.g. `Timesheet Report June 2026`);
   `extract_month_year()` regex uses the `MONTHS` list in `update_timesheet.py`.
-- **Two sheet layouts** are detected by the `Timesheet date` header (in row 6 or 7):
-  - **Format A** (note: date is a real date value) → columns `B C D E` = date, name, activity, hours.
-  - **Format B** (note: date is a text string) → columns `A B C D` = date, name, activity, hours.
+- **Two person-sheet layouts** are detected by the `Timesheet date` header (in row 6 or 7):
+  - **Format A** (date is a real date value) → columns `B C D E` = date, name, activity, hours.
+  - **Format B** (date is a text string) → columns `A B C D` = date, name, activity, hours.
   - Detection lives in `detect_sheet_format()`; the returned dict drives all writes.
 - **Total** is a row whose activity cell contains `Total hours` (found below the data).
-- **Budget rows** are the rows after a cell exactly `Worker name` in column B, ending
-  before a cell containing `SUBTOTAL` / `Total`.
+- **Budget rows** come from the CSV people: the script drops any placeholder rows, then
+  writes one row per CSV person after the `Worker name` header (column B), with the
+  summary's `Total hours` / `SUBTOTAL` row below. Machine-assigned **Role is left blank**
+  for the PM to fill in.
 
 ---
 
@@ -192,18 +210,19 @@ Keep these invariants in mind — they are why the output stays "as the template
    (`DATE_NUM_FMT`), matching the Bulgarian-style day display the template uses.
 3. **Formulas are dynamic.** `SUBTOTAL(9, D{first}:INDEX(D:D, ROW()-1))` sums only
    numeric cells and covers rows added manually. Don't replace with a fixed-range `SUM`.
-4. **Sibling sheets.** `update_budget_report()` resolves each person's sheet through the
-   budget row's *name cell*, which is itself a live reference (`='Timesheet X'!C8`) after
-   the first run. `_sheet_from_cross_ref()` parses that back for later runs. Don't break
-   the round-trip of "fresh template → written output → used as next input".
+4. **People come from the CSV only.** Person sheets are *cloned* from the placeholder per
+   CSV person and the placeholder is removed — the script never matches CSV names to
+   existing sheets. If you add a project/role mapping later, feed it into the summary from
+   the CSV (or a per-project source) rather than from the template's own sheets.
 5. **Month advance is data-driven.** Prefer the CSV's dominant month over
    "next month". Only when the CSV is empty does it fall back to `next_month`.
 6. **Don't add a Python convention the project doesn't use.** It's a single, dependency-free
    stdlib script: no classes, no dataclasses, no type-only scaffolding beyond the `dict`
    shapes already present. Match the surrounding style (plain functions, `dict`-typed
    helpers with `Optional` where needed).
-7. **Names → sheets is fuzzy.** `normalize_name()`/`match_csv_to_sheet()` handle
-   CamelCase splits. Keep capitalization-insensitive matching if you extend it.
+7. **The CSV drives the people.** Sheet titles come from the CSV `Name`s
+   (`_person_sheet_title`/`_unique_sheet_title` sanitize + de-dupe). No name→sheet fuzzy
+   matching exists anymore.
 
 ### Where to change what
 
