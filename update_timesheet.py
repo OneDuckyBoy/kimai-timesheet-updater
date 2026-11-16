@@ -303,6 +303,22 @@ def parse_kimai_csv(csv_path: str) -> dict[str, list[dict]]:
     return dict(data)
 
 
+def csv_client_project(csv_path: str) -> tuple[str, str]:
+    """
+    The export's customer and project (the `Customer` and `Project` columns), which the
+    sheets show as Client / Project. Taken from the first row that carries any; a Kimai
+    export's rows share one project, so the values are the same no matter the row.
+    """
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            client = (row.get("Customer") or "").strip()
+            project = (row.get("Project") or "").strip()
+            if client or project:
+                return client, project
+    return "", ""
+
+
 def group_by_date(entries: list[dict]) -> list[dict]:
     """
     Group entries by date: sum hours, concatenate descriptions with '; '.
@@ -454,10 +470,31 @@ def find_title_info(ws) -> Optional[dict]:
 
 # ── Updating a Person's Sheet ────────────────────────────────────────────────
 
+def _write_label_value(ws, label: str, value: str) -> None:
+    """Write a client/project value into the cells a sheet labels, whichever layout it has.
+    A person sheet keeps `Client`/`Project` in column A and the value in B; a summary joins
+    them in one cell (`Client All Digital`). Both are handled, so the shared template's own
+    placeholder never leaks into a different project's file."""
+    if not value:
+        return
+    for row in range(1, 6):
+        a = ws[f"A{row}"].value
+        if not a:
+            continue
+        text = str(a).strip()
+        if text.lower() == label.lower():
+            ws[f"B{row}"] = value
+            return
+        if text.lower().startswith(label.lower() + " "):
+            ws[f"A{row}"] = f"{label} {value}"
+            return
+
+
 def update_person_sheet_v2(ws, fmt: dict, worker_name: str,
                            entries_by_date: list[dict],
                            new_month: str, new_year: int,
-                           old_month: str, old_year: int) -> None:
+                           old_month: str, old_year: int,
+                           client: str = "", project: str = "") -> None:
     """
     Update a single person's timesheet.
     v2: worker_name passed explicitly.
@@ -476,6 +513,10 @@ def update_person_sheet_v2(ws, fmt: dict, worker_name: str,
             title_info["text"], old_month, old_year, new_month, new_year
         )
         ws[title_info["cell"]] = new_title
+
+    # ── Client / Project from the export, never the template's placeholder ──
+    _write_label_value(ws, "Client", client)
+    _write_label_value(ws, "Project", project)
 
     # ── Capture the template's cell styles BEFORE modifying anything ────
     # We copy style from the first data row of the template so that rows
@@ -604,7 +645,8 @@ def update_budget_report(wb, kimai_data: dict[str, list[dict]],
                          name_to_sheet: dict[str, str],
                          sheet_totals: dict[str, float],
                          new_month: str, new_year: int,
-                         old_month: str, old_year: int) -> None:
+                         old_month: str, old_year: int,
+                         client: str = "", project: str = "") -> None:
     """
     Rebuild the Team Budget Report sheet's data rows from the CSV people:
     one row per person with live INDEX/MATCH formulas into their sheet, a
@@ -631,6 +673,10 @@ def update_budget_report(wb, kimai_data: dict[str, list[dict]],
                     break
 
     _, _, date_display = month_date_range(new_month, new_year)
+
+    # ── Client / Project from the export, never the template's placeholder ──
+    _write_label_value(ws, "Client", client)
+    _write_label_value(ws, "Project", project)
 
     # ── Locate the header, the data area and the total row ───────────────
     first_data_row = None
@@ -794,6 +840,7 @@ def main():
     print(f"📂 Loading CSV:   {args.csv}")
     kimai_data = parse_kimai_csv(args.csv)
     print(f"   Found {len(kimai_data)} people in CSV")
+    client, project = csv_client_project(args.csv)
 
     # ── Detect month ─────────────────────────────────────────────────────
     old_month, old_year = None, None
@@ -874,6 +921,7 @@ def main():
         update_person_sheet_v2(
             new_ws, ph_fmt, csv_name, grouped,
             new_month, new_year, old_month, old_year,
+            client, project,
         )
         total = sum(e["hours"] for e in grouped)
         has = "✓" if grouped else "✗ (0 hours)"
@@ -888,7 +936,8 @@ def main():
     print(f"\n📊 Updating Team Budget Report...")
     update_budget_report(
         wb, kimai_data, created, {},
-        new_month, new_year, old_month, old_year
+        new_month, new_year, old_month, old_year,
+        client, project,
     )
     print(f"   Done")
 

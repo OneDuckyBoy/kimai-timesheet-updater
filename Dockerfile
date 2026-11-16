@@ -14,6 +14,9 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY update_timesheet.py ./
+COPY update_timesheet.py server.py ./
 
+# Default: the CLI (docker run --rm image <template> <csv> [-o out]).
+# As a long-running sidecar (ai-automation), override with:
+#   command: ["python", "/app/server.py"]          # POST /generate
 ENTRYPOINT ["python", "/app/update_timesheet.py"]
